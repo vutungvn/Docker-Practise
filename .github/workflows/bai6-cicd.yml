@@ -1,0 +1,138 @@
+name: CI/CD
+
+on:
+  push:
+    paths:
+      - "bai6/**"
+      - ".github/workflows/bai6-cicd.yml"
+  workflow_dispatch: # manual re-run from the Actions tab (any branch)
+
+# Least privilege by default; only the job that pushes gets write access to packages.
+permissions:
+  contents: read
+
+# A newer push on the same branch cancels the old run (never on main, so every main commit gets an image).
+concurrency:
+  group: bai6-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  IMAGE_NAME: shopfast-api
+
+defaults:
+  run:
+    working-directory: bai6
+
+jobs:
+  test:
+    name: Test (unit + integration)
+    runs-on: ubuntu-latest
+
+    # Integration tests need a real Postgres and Redis.
+    # Throwaway containers that live only for this job: trust auth, so no password exists to leak.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: shopfast_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://postgres@localhost:5432/shopfast_test
+      REDIS_URL: redis://localhost:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          # (1) Cache ~/.npm, keyed on the lockfile hash: later runs restore packages instead of downloading them.
+          cache: npm
+          cache-dependency-path: bai6/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Type check and compile
+        run: npm run build
+
+      # (2) Tests are the gate: if any of them fails, this job fails and build-and-push never starts.
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Integration tests (Postgres + Redis)
+        run: npm run test:integration
+
+  build-and-push:
+    name: Build image, push on main only
+    needs: test # (2) packaging only runs after every test has passed
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # GHCR requires a lowercase image path.
+      - name: Compute image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+
+      # (5) Two tags per build: the immutable commit SHA (for rollback) and the moving "latest".
+      # Docker layers are cached in GitHub Actions cache, so unchanged layers are not rebuilt.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: bai6
+          load: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=bai6
+          cache-to: type=gha,mode=max,scope=bai6
+
+      # (3) No password in this file: GITHUB_TOKEN is a short-lived token GitHub issues for each run.
+      # (4) Only the main branch may log in and push.
+      - name: Log in to GHCR
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image (main only)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          docker push "$IMAGE:$GITHUB_SHA"
+          docker push "$IMAGE:latest"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### ShopFast image"
+            echo "- Branch: \`$GITHUB_REF_NAME\`  |  Commit: \`$GITHUB_SHA\`"
+            if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+              echo "- **Pushed:** \`$IMAGE:$GITHUB_SHA\` and \`$IMAGE:latest\`"
+              echo "- Rollback: \`docker pull $IMAGE:<previous-commit-sha>\`"
+            else
+              echo "- **Not pushed**: \`$GITHUB_REF_NAME\` is not \`main\` (image was only built to check the Dockerfile)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

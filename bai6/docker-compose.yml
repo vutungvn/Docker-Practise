@@ -1,0 +1,33 @@
+# Local stack that mirrors the CI service containers (host ports 15432/16379 avoid clashing with other local DBs).
+#   docker compose up -d db redis   -> then: npm test
+#   docker compose up -d --build    -> also runs the API on http://localhost:3000
+# Throwaway dev databases: trust auth, bound to 127.0.0.1 only. Never use this for production.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: shopfast
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports: ["127.0.0.1:15432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports: ["127.0.0.1:16379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 20
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgres://postgres@db:5432/shopfast
+      REDIS_URL: redis://redis:6379
+    ports: ["127.0.0.1:3000:3000"]
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
