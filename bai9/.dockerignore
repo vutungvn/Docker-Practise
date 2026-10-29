@@ -1,0 +1,16 @@
+node_modules
+dist
+coverage
+test
+deploy
+demo
+.git
+.gitignore
+.env
+.env.*
+*.log
+*.md
+.prettierrc.json
+.gitleaks.toml
+Dockerfile*
+.dockerignore

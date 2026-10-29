@@ -1,0 +1,65 @@
+# Shared topology for every environment. deploy.sh runs it as project "shopfast-bai9-<env>" with the
+# values of deploy/environments/<env>.env plus the secrets of the matching GitHub Environment.
+#   stable    = version currently serving (rollback target)
+#   candidate = version being deployed
+x-app: &app
+  environment: &app-env
+    DATABASE_URL: postgres://shopfast:${DB_PASSWORD:?DB_PASSWORD is required}@db:5432/shopfast
+    APP_ENV: ${DEPLOY_ENV:?DEPLOY_ENV is required}
+    STARTUP_DELAY_SECONDS: ${STARTUP_DELAY_SECONDS:-0}
+  healthcheck:
+    test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/ready || exit 1"]
+    interval: 2s
+    timeout: 2s
+    retries: 3
+    start_period: 30s
+  depends_on:
+    db: { condition: service_healthy }
+  restart: unless-stopped # a crash shows up as RestartCount > 0, one of the rollback criteria
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: shopfast
+      POSTGRES_USER: shopfast
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+    volumes: [dbdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shopfast -d shopfast"]
+      interval: 2s
+      retries: 30
+
+  stable:
+    <<: *app
+    image: ${IMAGE:?IMAGE is required}:${STABLE_VERSION:-none}
+    environment:
+      <<: *app-env
+      APP_VERSION: ${STABLE_VERSION:-none}
+
+  candidate:
+    <<: *app
+    image: ${IMAGE:?IMAGE is required}:${CANDIDATE_VERSION:?CANDIDATE_VERSION is required}
+    environment:
+      <<: *app-env
+      APP_VERSION: ${CANDIDATE_VERSION}
+      FAULT_MODE: ${FAULT_MODE:-none} # demo-only, see src/fault.ts
+
+  migrate:
+    image: ${IMAGE}:${MIGRATE_VERSION:-none}
+    command: ["node", "dist/migrate-cli.js"]
+    environment:
+      <<: *app-env
+    depends_on:
+      db: { condition: service_healthy }
+    profiles: [tools]
+
+  lb:
+    image: nginx:1.27-alpine
+    ports: ["127.0.0.1:${LB_PORT:-8080}:80"]
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ${UPSTREAM_DIR:?UPSTREAM_DIR is required}:/etc/nginx/upstream:ro
+
+volumes:
+  dbdata:
