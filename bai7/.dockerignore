@@ -1,0 +1,16 @@
+node_modules
+dist
+coverage
+test
+deploy
+scripts
+.git
+.gitignore
+.env
+.env.*
+*.log
+*.md
+docker-compose.yml
+.prettierrc.json
+Dockerfile*
+.dockerignore

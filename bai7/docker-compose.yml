@@ -1,0 +1,15 @@
+# Local Postgres for running the integration tests (mirrors the CI service container).
+#   docker compose up -d --wait
+#   DATABASE_URL=postgres://postgres@localhost:15433/shopfast_test npm test
+# Throwaway test database: trust auth, bound to 127.0.0.1 only.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: shopfast_test
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports: ["127.0.0.1:15433:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      retries: 20

@@ -1,0 +1,36 @@
+# One stack per environment: deploy.sh runs it as compose project "shopfast-<env>".
+# Every value below comes from the environment (GitHub Environment secrets/vars in CI) - nothing is hard-coded.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: shopfast
+      POSTGRES_USER: shopfast
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+    volumes: [dbdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shopfast -d shopfast"]
+      interval: 2s
+      retries: 30
+    restart: unless-stopped
+
+  app:
+    image: ${IMAGE:?IMAGE is required}:${APP_VERSION:?APP_VERSION is required}
+    environment:
+      DATABASE_URL: postgres://shopfast:${DB_PASSWORD}@db:5432/shopfast
+      APP_ENV: ${DEPLOY_ENV:?DEPLOY_ENV is required}
+      APP_VERSION: ${APP_VERSION}
+    ports: ["127.0.0.1:${APP_PORT:-8080}:3000"]
+    depends_on:
+      db: { condition: service_healthy }
+    # Faster probe than the image default so a deploy is verified within seconds.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  dbdata:
