@@ -1,0 +1,71 @@
+# ShopFast at peak hour: nginx load balancer in front of two colors of 4 API containers each.
+# Normally only one color runs (4 containers); during a deploy both run (8 = the 2x budget cap).
+# Driven by scripts/blue-green.sh - do not scale the app services by hand.
+name: shopfast-bai8
+
+x-app: &app
+  environment: &app-env
+    DATABASE_URL: postgres://shopfast:${DB_PASSWORD:?DB_PASSWORD is required}@db:5432/shopfast
+    STARTUP_DELAY_SECONDS: ${STARTUP_DELAY_SECONDS:-25}
+    DRAIN_SECONDS: ${DRAIN_SECONDS:-30}
+  healthcheck:
+    test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/ready || exit 1"]
+    interval: 2s
+    timeout: 2s
+    retries: 3
+    start_period: 60s
+  # Must exceed DRAIN_SECONDS, otherwise Docker kills the container before realtime users are moved.
+  stop_grace_period: 60s
+  depends_on:
+    db: { condition: service_healthy }
+  restart: unless-stopped
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: shopfast
+      POSTGRES_USER: shopfast
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+    volumes: [dbdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shopfast -d shopfast"]
+      interval: 2s
+      retries: 30
+
+  app-blue:
+    <<: *app
+    image: shopfast-bai8:${BLUE_VERSION:-v1}
+    environment:
+      <<: *app-env
+      COLOR: blue
+
+  app-green:
+    <<: *app
+    image: shopfast-bai8:${GREEN_VERSION:-v1}
+    environment:
+      <<: *app-env
+      COLOR: green
+
+  # One-off migration runner, always with the image of the release being deployed.
+  migrate:
+    image: shopfast-bai8:${MIGRATE_VERSION:-v1}
+    command: ["node", "dist/migrate-cli.js"]
+    environment:
+      <<: *app-env
+    depends_on:
+      db: { condition: service_healthy }
+    profiles: [tools]
+
+  lb:
+    image: nginx:1.27-alpine
+    ports:
+      - "127.0.0.1:${LB_PORT:-8080}:80" # live traffic
+      - "127.0.0.1:${PREVIEW_PORT:-8081}:81" # smoke tests against the idle color
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/generated:/etc/nginx/bluegreen:ro
+    restart: unless-stopped
+
+volumes:
+  dbdata:
