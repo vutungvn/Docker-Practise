@@ -1,0 +1,108 @@
+
+=== D0. COPY . . with the developer's own node_modules -> build breaks ===
+#8 0.332 /app/node_modules/.bin/tsc: 33: exec: node.exe: not found
+#8 ERROR: process "/bin/sh -c npm run build" did not complete successfully: exit code: 127
+0.332 /app/node_modules/.bin/tsc: 33: exec: node.exe: not found
+
+=== B0. Build the original image from a clean checkout (cold, no cache) ===
+Cold build time: 21s
+
+=== D1. Image size + heavy base image (node:20 = full Debian) ===
+$ docker image ls --format 'table {{.Repository}}:{{.Tag}}\t{{.Size}}' | grep -E '^(shopfast:before|node:20 )'
+shopfast:before              1.71GB
+node:20                      1.58GB
+$ docker image ls node:20 --format 'node:20 base = {{.Size}}'
+node:20 base = 1.58GB
+$ docker history shopfast:before --format 'table {{.Size}}\t{{.CreatedBy}}' | head -12
+SIZE      CREATED BY
+0B        CMD ["npm" "run" "start:dev"]
+0B        EXPOSE map[3000/tcp:{}]
+41kB      RUN /bin/sh -c npm run build # buildkit
+0B        ENV JWT_SECRET=shopfast-secret-key-2026
+0B        ENV DATABASE_URL=postgres://admin:MatKhau123…
+105MB     RUN /bin/sh -c npm install # buildkit
+295kB     COPY . . # buildkit
+8.19kB    WORKDIR /app
+0B        CMD ["node"]
+0B        ENTRYPOINT ["docker-entrypoint.sh"]
+20.5kB    COPY docker-entrypoint.sh /usr/local/bin/ # …
+
+=== D2. Hard-coded secrets are visible to anyone who pulls the image ===
+$ docker history --no-trunc shopfast:before | grep -oE '(DATABASE_URL|JWT_SECRET)=[^ ]+'
+JWT_SECRET=shopfast-secret-key-2026
+DATABASE_URL=postgres://admin:MatKhau123@db:5432/shopfast
+$ docker image inspect shopfast:before --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E 'DATABASE_URL|JWT_SECRET'
+DATABASE_URL=postgres://admin:MatKhau123@db:5432/shopfast
+JWT_SECRET=shopfast-secret-key-2026
+
+=== D3. COPY . . without .dockerignore: .env, test/, scripts/, Dockerfile... end up in the image ===
+$ docker run --rm --entrypoint sh shopfast:before -c 'ls -la /app'
+total 264
+drwxr-xr-x   1 root   root     4096 Oct 28 13:49 .
+drwxr-xr-x   1 root   root     4096 Oct 28 13:49 ..
+-rw-r--r--   1 197609 197121    171 Oct 28 13:33 .dockerignore
+-rw-r--r--   1 197609 197121    104 Oct 28 13:33 .env
+-rw-r--r--   1 197609 197121    188 Oct 28 13:33 .env.example
+-rw-r--r--   1 197609 197121     62 Oct 28 13:33 .gitignore
+-rw-r--r--   1 197609 197121   1460 Oct 28 13:33 Dockerfile
+drwxr-xr-x   2 197609 197121   4096 Oct 28 13:43 before
+drwxr-xr-x   2 root   root     4096 Oct 28 13:49 dist
+drwxr-xr-x 310 root   root    12288 Oct 28 13:49 node_modules
+-rw-r--r--   1 197609 197121 197413 Oct 28 13:49 package-lock.json
+-rw-r--r--   1 197609 197121    772 Oct 28 13:29 package.json
+drwxr-xr-x   2 197609 197121   4096 Oct 28 13:48 scripts
+drwxr-xr-x   2 197609 197121   4096 Oct 28 13:48 src
+drwxr-xr-x   2 197609 197121   4096 Oct 28 13:29 test
+-rw-r--r--   1 197609 197121    253 Oct 28 13:29 tsconfig.json
+$ docker run --rm --entrypoint cat shopfast:before /app/.env
+DATABASE_URL=postgres://admin:MatKhau123@db:5432/shopfast
+JWT_SECRET=shopfast-secret-key-2026
+PORT=3000
+
+=== D4. TypeScript source + devDependencies shipped to production ===
+$ docker run --rm --entrypoint sh shopfast:before -c 'find /app/src /app/test -name "*.ts"'
+/app/src/app.ts
+/app/src/config.ts
+/app/src/main.ts
+/app/test/app.spec.ts
+$ docker run --rm --entrypoint sh shopfast:before -c 'du -sh /app/node_modules; ls /app/node_modules | wc -l; ls -d /app/node_modules/typescript /app/node_modules/jest /app/node_modules/ts-node-dev'
+79M	/app/node_modules
+307
+/app/node_modules/jest
+/app/node_modules/ts-node-dev
+/app/node_modules/typescript
+
+=== D5. Container runs as root ===
+$ docker run --rm --entrypoint id shopfast:before
+uid=0(root) gid=0(root) groups=0(root)
+$ docker image inspect shopfast:before --format 'User="{{.Config.User}}"'
+User=""
+
+=== D6. Dev start command (npm -> ts-node-dev watch) instead of production ===
+$ docker image inspect shopfast:before --format 'Cmd={{json .Config.Cmd}}'
+Cmd=["npm","run","start:dev"]
+$ docker exec sf-before ps -o pid,user,rss,args
+  PID USER       RSS COMMAND
+    1 root     53440 npm run start:dev
+   18 root      1440 sh -c ts-node-dev --respawn --transpile-only src/main.ts
+   19 root     90228 node /app/node_modules/.bin/ts-node-dev --respawn --transpile-only src/main.ts
+   26 root     51684 /usr/local/bin/node -r /tmp/ts-node-dev-hook-39167752674110323.js /app/node_modules/ts-node-dev/lib/wrap.js src/main.ts
+   37 root      4320 ps -o pid,user,rss,args
+$ docker exec sf-before sh -c 'echo NODE_ENV=${NODE_ENV:-<unset>}'
+NODE_ENV=<unset>
+$ docker stats --no-stream --format 'RAM {{.MemUsage}}' sf-before
+RAM 75.41MiB / 7.601GiB
+$ docker exec sf-before env | grep -E 'DATABASE_URL|JWT_SECRET'
+DATABASE_URL=postgres://admin:MatKhau123@db:5432/shopfast
+JWT_SECRET=shopfast-secret-key-2026
+
+=== D7. Layer order kills the cache: change 1 line -> npm install runs again ===
+Rebuild after 1-line change: 21s
+$ grep -E '^#[0-9]+ \[[0-9]/[0-9]\]|CACHED|added [0-9]+ packages' before/build.log | head -12
+#4 [1/5] FROM docker.io/library/node:20@sha256:8f693eaa7e0a8e71560c9a82b55fd54c2ae920a2ba5d2cde28bac7d1c01c9ba5
+#5 [2/5] WORKDIR /app
+#5 CACHED
+#6 [3/5] COPY . .
+#7 [4/5] RUN npm install
+#7 16.27 added 415 packages, and audited 416 packages in 16s
+#8 [5/5] RUN npm run build

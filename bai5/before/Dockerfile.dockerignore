@@ -1,0 +1,2 @@
+# Intentionally empty: reproduces the original setup where no .dockerignore existed,
+# so `COPY . .` sends everything (node_modules, .env, test, ...) into the image.

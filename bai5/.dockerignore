@@ -1,0 +1,16 @@
+# Never send these to the build context
+node_modules
+dist
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+*.log
+coverage
+test
+before
+scripts
+README.md
+Dockerfile*
+.dockerignore
